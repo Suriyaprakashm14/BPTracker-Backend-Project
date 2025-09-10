@@ -1,12 +1,7 @@
 services:
   - type: web
-    name: bp-tracker-backend
+    name: bp-tracker
     env: python
-    plan: free
-    region: oregon  # or change to a closer region
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
-    envVars:
-      - key: DATABASE_URL
-        sync: false   # Set this in Render Dashboard manually
-    healthCheckPath: /health
+    plan: free

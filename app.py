@@ -3,61 +3,44 @@ import uuid
 from datetime import datetime
 from io import BytesIO
 
-from flask import Flask, request, jsonify, g, send_file
+from flask import Flask, request, jsonify, send_file
+from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 import openpyxl
-import psycopg2
-import psycopg2.extras
 
 # ---------------- Setup ----------------
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:[#0meWork@897]@db.xtmgrvoyoniqejycagry.supabase.co:5432/postgres"
-)
-
 app = Flask(__name__)
 CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": "*"}})
 
+# ---------------- Database Config (Clever Cloud MySQL) ----------------
+DB_HOST = os.getenv("MYSQL_ADDON_HOST", "bxlgjcwgxetaghluuycc-mysql.services.clever-cloud.com")
+DB_PORT = os.getenv("MYSQL_ADDON_PORT", "3306")
+DB_NAME = os.getenv("MYSQL_ADDON_DB", "bxlgjcwgxetaghluuycc")
+DB_USER = os.getenv("MYSQL_ADDON_USER", "uyvxlru6qtyjaadu")
+DB_PASS = os.getenv("MYSQL_ADDON_PASSWORD", "AVNxHAeU1C76JuCF5rYq")
 
-# ---------------- Database ----------------
-def get_db():
-    db = getattr(g, "_database", None)
-    if db is None:
-        db = g._database = psycopg2.connect(DATABASE_URL, sslmode="require")
-    return db
+app.config["SQLALCHEMY_DATABASE_URI"] = f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
+db = SQLAlchemy(app)
 
-def init_db():
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-          id SERIAL PRIMARY KEY,
-          username TEXT UNIQUE,
-          password_hash TEXT,
-          token TEXT
-        );
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS bp_readings (
-          id SERIAL PRIMARY KEY,
-          user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-          systolic INTEGER,
-          diastolic INTEGER,
-          created_at TIMESTAMP DEFAULT NOW()
-        );
-    """)
-    db.commit()
-    cur.close()
+# ---------------- Models ----------------
+class User(db.Model):
+    __tablename__ = "users"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    username = db.Column(db.String(50), unique=True, nullable=False)
+    password_hash = db.Column(db.String(255), nullable=False)
+    token = db.Column(db.String(255), nullable=True)
 
 
-@app.teardown_appcontext
-def close_db(exc):
-    db = getattr(g, "_database", None)
-    if db is not None:
-        db.close()
-
+class BPReading(db.Model):
+    __tablename__ = "bp_readings"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    systolic = db.Column(db.Integer, nullable=False)
+    diastolic = db.Column(db.Integer, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 # ---------------- Auth Helper ----------------
 def authenticate_request():
@@ -68,13 +51,7 @@ def authenticate_request():
     if len(parts) != 2 or parts[0].lower() != "bearer":
         return None
     token = parts[1]
-    db = get_db()
-    cur = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
-    cur.execute("SELECT * FROM users WHERE token=%s", (token,))
-    user = cur.fetchone()
-    cur.close()
-    return user
-
+    return User.query.filter_by(token=token).first()
 
 # ---------------- Auth APIs ----------------
 @app.route("/api/register", methods=["POST"])
@@ -85,21 +62,15 @@ def register():
     if not username or not password:
         return jsonify({"error": "username and password required"}), 400
 
-    db = get_db()
-    cur = db.cursor()
-    try:
-        pw_hash = generate_password_hash(password)
-        cur.execute(
-            "INSERT INTO users (username, password_hash) VALUES (%s, %s)",
-            (username, pw_hash),
-        )
-        db.commit()
-        return jsonify({"ok": True}), 201
-    except psycopg2.Error:
-        db.rollback()
+    if User.query.filter_by(username=username).first():
         return jsonify({"error": "username taken"}), 400
-    finally:
-        cur.close()
+
+    pw_hash = generate_password_hash(password)
+    new_user = User(username=username, password_hash=pw_hash)
+    db.session.add(new_user)
+    db.session.commit()
+
+    return jsonify({"ok": True}), 201
 
 
 @app.route("/api/login", methods=["POST"])
@@ -108,22 +79,15 @@ def login():
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
 
-    db = get_db()
-    cur = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
-    cur.execute("SELECT * FROM users WHERE username=%s", (username,))
-    user = cur.fetchone()
-
-    if not user or not check_password_hash(user["password_hash"], password):
-        cur.close()
+    user = User.query.filter_by(username=username).first()
+    if not user or not check_password_hash(user.password_hash, password):
         return jsonify({"error": "invalid credentials"}), 401
 
     token = str(uuid.uuid4())
-    cur.execute("UPDATE users SET token=%s WHERE id=%s", (token, user["id"]))
-    db.commit()
-    cur.close()
+    user.token = token
+    db.session.commit()
 
-    return jsonify({"token": token, "username": user["username"]})
-
+    return jsonify({"token": token, "username": user.username})
 
 # ---------------- BP APIs ----------------
 @app.route("/api/bp", methods=["POST"])
@@ -139,15 +103,9 @@ def submit_bp():
     except Exception:
         return jsonify({"error": "systolic and diastolic must be integers"}), 400
 
-    now = datetime.utcnow()
-    db = get_db()
-    cur = db.cursor()
-    cur.execute(
-        "INSERT INTO bp_readings (user_id, systolic, diastolic, created_at) VALUES (%s, %s, %s, %s)",
-        (user["id"], sys, dia, now),
-    )
-    db.commit()
-    cur.close()
+    reading = BPReading(user_id=user.id, systolic=sys, diastolic=dia)
+    db.session.add(reading)
+    db.session.commit()
     return jsonify({"ok": True})
 
 
@@ -164,19 +122,13 @@ def update_bp(bp_id):
     except Exception:
         return jsonify({"error": "systolic and diastolic must be integers"}), 400
 
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("SELECT id FROM bp_readings WHERE id=%s AND user_id=%s", (bp_id, user["id"]))
-    if cur.fetchone() is None:
-        cur.close()
+    reading = BPReading.query.filter_by(id=bp_id, user_id=user.id).first()
+    if not reading:
         return jsonify({"error": "not found"}), 404
 
-    cur.execute(
-        "UPDATE bp_readings SET systolic=%s, diastolic=%s WHERE id=%s",
-        (sys, dia, bp_id),
-    )
-    db.commit()
-    cur.close()
+    reading.systolic = sys
+    reading.diastolic = dia
+    db.session.commit()
     return jsonify({"ok": True})
 
 
@@ -186,16 +138,12 @@ def delete_bp(bp_id):
     if not user:
         return jsonify({"error": "unauthorized"}), 401
 
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("SELECT id FROM bp_readings WHERE id=%s AND user_id=%s", (bp_id, user["id"]))
-    if cur.fetchone() is None:
-        cur.close()
+    reading = BPReading.query.filter_by(id=bp_id, user_id=user.id).first()
+    if not reading:
         return jsonify({"error": "not found"}), 404
 
-    cur.execute("DELETE FROM bp_readings WHERE id=%s", (bp_id,))
-    db.commit()
-    cur.close()
+    db.session.delete(reading)
+    db.session.commit()
     return jsonify({"ok": True})
 
 
@@ -205,16 +153,17 @@ def history():
     if not user:
         return jsonify({"error": "unauthorized"}), 401
 
-    db = get_db()
-    cur = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
-    cur.execute(
-        "SELECT id, systolic, diastolic, created_at FROM bp_readings WHERE user_id=%s ORDER BY id DESC",
-        (user["id"],),
-    )
-    rows = [dict(r) for r in cur.fetchall()]
-    cur.close()
+    readings = BPReading.query.filter_by(user_id=user.id).order_by(BPReading.id.desc()).all()
+    rows = [
+        {
+            "id": r.id,
+            "systolic": r.systolic,
+            "diastolic": r.diastolic,
+            "created_at": r.created_at.isoformat(),
+        }
+        for r in readings
+    ]
     return jsonify({"history": rows})
-
 
 # ---------------- Excel Export ----------------
 @app.route("/api/export", methods=["GET"])
@@ -226,26 +175,20 @@ def export_excel():
     start_date = request.args.get("start")
     end_date = request.args.get("end")
 
-    query = "SELECT systolic, diastolic, created_at FROM bp_readings WHERE user_id=%s"
-    params = [user["id"]]
+    query = BPReading.query.filter_by(user_id=user.id)
 
     if start_date and end_date:
-        query += " AND created_at BETWEEN %s AND %s"
-        params.extend([start_date, end_date])
+        query = query.filter(BPReading.created_at.between(start_date, end_date))
 
-    db = get_db()
-    cur = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
-    cur.execute(query, params)
-    rows = cur.fetchall()
-    cur.close()
+    rows = query.all()
 
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "BP Readings"
-    ws.append(["Systolic", "Diastolic", "Date/Time"])
 
-    for row in rows:
-        ws.append([row["systolic"], row["diastolic"], row["created_at"].isoformat()])
+    ws.append(["Systolic", "Diastolic", "Date/Time"])
+    for r in rows:
+        ws.append([r.systolic, r.diastolic, r.created_at.isoformat()])
 
     output = BytesIO()
     wb.save(output)
@@ -260,13 +203,13 @@ def export_excel():
     )
 
 # ---------------- Health Check ----------------
-@app.route("/health", methods=["GET"])
+@app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"}), 200
-
+    return jsonify({"status": "ok", "message": "Flask app running on Render"})
 
 # ---------------- Main ----------------
 if __name__ == "__main__":
     with app.app_context():
-        init_db()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+        db.create_all()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
