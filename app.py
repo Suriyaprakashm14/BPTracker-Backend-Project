@@ -11,7 +11,8 @@ import openpyxl
 
 # ---------------- Setup ----------------
 app = Flask(__name__)
-CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": "*"}})
+# Allow CORS for all routes, including root and /health
+CORS(app, supports_credentials=True, resources={r"/*": {"origins": "*"}})
 
 # ---------------- Database Config (Clever Cloud MySQL) ----------------
 DB_HOST = os.getenv("MYSQL_ADDON_HOST", "bxlgjcwgxetaghluuycc-mysql.services.clever-cloud.com")
@@ -204,8 +205,17 @@ def export_excel():
 
 # ---------------- Health Check ----------------
 @app.route("/api/health", methods=["GET"])
-def health():
+def api_health():
     return jsonify({"status": "ok", "message": "Flask app running on Render"})
+
+# Add root and plain health routes
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({"message": "Backend is running on Render"}), 200
+
+@app.route("/health", methods=["GET"])
+def plain_health():
+    return jsonify({"status": "ok", "message": "Health check passed"}), 200
 
 # ---------------- Main ----------------
 if __name__ == "__main__":
