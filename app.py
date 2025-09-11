@@ -1,6 +1,6 @@
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 
 from flask import Flask, request, jsonify, send_file
@@ -9,10 +9,13 @@ from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 import openpyxl
 
+# ----------------TIMEZONE----------------
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
 # ---------------- Setup ----------------
 app = Flask(__name__)
-# Allow CORS for all routes, including root and /health
-CORS(app, supports_credentials=True, resources={r"/*": {"origins": "*"}})
+CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": "*"}})
 
 # ---------------- Database Config (Clever Cloud MySQL) ----------------
 DB_HOST = os.getenv("MYSQL_ADDON_HOST", "bxlgjcwgxetaghluuycc-mysql.services.clever-cloud.com")
@@ -41,7 +44,7 @@ class BPReading(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     systolic = db.Column(db.Integer, nullable=False)
     diastolic = db.Column(db.Integer, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(IST), nullable=False)
 
 # ---------------- Auth Helper ----------------
 def authenticate_request():
@@ -205,22 +208,12 @@ def export_excel():
 
 # ---------------- Health Check ----------------
 @app.route("/api/health", methods=["GET"])
-def api_health():
+def health():
     return jsonify({"status": "ok", "message": "Flask app running on Render"})
 
-# Add root and plain health routes
-@app.route("/", methods=["GET"])
-def root():
-    return jsonify({"message": "Backend is running on Render"}), 200
-
-@app.route("/health", methods=["GET"])
-def plain_health():
-    return jsonify({"status": "ok", "message": "Health check passed"}), 200
-
 # ---------------- Main ----------------
-with app.app_context():
-    db.create_all()
-
 if __name__ == "__main__":
+    with app.app_context():
+        db.create_all()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
