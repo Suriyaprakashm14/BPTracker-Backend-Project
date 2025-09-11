@@ -9,13 +9,10 @@ from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 import openpyxl
 
-# ----------------TIMEZONE----------------
-IST = timezone(timedelta(hours=5, minutes=30))
-
-
 # ---------------- Setup ----------------
 app = Flask(__name__)
-CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": "*"}})
+# Allow CORS for all routes, including root and /health
+CORS(app, supports_credentials=True, resources={r"/*": {"origins": "*"}})
 
 # ---------------- Database Config (Clever Cloud MySQL) ----------------
 DB_HOST = os.getenv("MYSQL_ADDON_HOST", "bxlgjcwgxetaghluuycc-mysql.services.clever-cloud.com")
@@ -28,6 +25,9 @@ app.config["SQLALCHEMY_DATABASE_URI"] = f"mysql+pymysql://{DB_USER}:{DB_PASS}@{D
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
+#---------------Time Stamp---------------------
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 # ---------------- Models ----------------
 class User(db.Model):
@@ -44,7 +44,7 @@ class BPReading(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     systolic = db.Column(db.Integer, nullable=False)
     diastolic = db.Column(db.Integer, nullable=False)
-    created_at = db.Column(db.DateTime, default=lambda: datetime.now(IST), nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(IST))
 
 # ---------------- Auth Helper ----------------
 def authenticate_request():
@@ -208,12 +208,22 @@ def export_excel():
 
 # ---------------- Health Check ----------------
 @app.route("/api/health", methods=["GET"])
-def health():
+def api_health():
     return jsonify({"status": "ok", "message": "Flask app running on Render"})
 
+# Add root and plain health routes
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({"message": "Backend is running on Render"}), 200
+
+@app.route("/health", methods=["GET"])
+def plain_health():
+    return jsonify({"status": "ok", "message": "Health check passed"}), 200
+
 # ---------------- Main ----------------
+with app.app_context():
+    db.create_all()
+
 if __name__ == "__main__":
-    with app.app_context():
-        db.create_all()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
